@@ -313,8 +313,7 @@ df_no_outliers = df[(df['price'] >= q1 - 1.5 * iqr) & (df['price'] <= q3 + 1.5 *
 ```
 
 🎨 Несколько boxplot’ов сразу
-```
-df[['price', 'minimum nights', 'availability 365']].plot(kind='box', figsize=(8,5))
+```df[['price', 'minimum nights', 'availability 365']].plot(kind='box', figsize=(8,5))
 plt.title('Boxplot для нескольких переменных')
 plt.show()
 ```
