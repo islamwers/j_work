@@ -1,0 +1,506 @@
+---
+title: "Лекция 2. Транспортные данные в R"
+subtitle: "Импорт, настройка, очистка, dplyr и первый аналитический вывод"
+author: "Дисциплина: Анализ данных для цифровых технологий на транспорте"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = FALSE)
+```
+
+# Зачем эта лекция
+
+Первая лекция была про вход в R: объекты, векторы, матрицы, индексацию, первые команды и первые ошибки. Теперь идём дальше: берём не игрушечный один вектор, а **таблицу транспортных событий** и превращаем её в аналитический результат.
+
+Рабочая логика занятия:
+
+```text
+сырой CSV -> импорт -> проверка -> очистка -> новые признаки -> группировка -> график -> вывод
+```
+
+**Идея занятия:** RStudio становится рабочим столом аналитика. Данные входят, код работает, результат появляется. Иногда появляется красный текст, но это не конец света, а просто R сказал: «посмотри сюда, тут жопа в данных».
+
+# План на 80 минут
+
+| Время | Блок | Что делаем |
+|---:|---|---|
+| 0-10 мин | Настройка | Проект, рабочая папка, пакеты |
+| 10-20 мин | Импорт | Читаем CSV, смотрим первые строки |
+| 20-35 мин | Осмотр | `glimpse()`, `skim()`, имена столбцов |
+| 35-50 мин | Очистка | типы, даты, пропуски, дубли, странные значения |
+| 50-65 мин | `dplyr` | `select`, `filter`, `mutate`, `group_by`, `summarise` |
+| 65-75 мин | График | `ggplot2`: где задержки выше |
+| 75-80 мин | Мини-миссия | 3 вопроса и один управленческий вывод |
+
+# 0. Настройка рабочего проекта
+
+Перед занятием положите рядом с этим файлом папки:
+
+```text
+lecture_2_transport_R/
+├── data/
+│   ├── transport_events_raw.csv
+│   └── stations_reference.csv
+├── outputs/
+├── images/
+├── 00_setup.R
+├── lecture_2_transport_data.R
+└── lecture_2_transport_data.Rmd
+```
+
+**Главное правило:** не открываем одинокий файл где попало. Открываем проект в RStudio, чтобы R понимал, где лежат данные.
+
+```{r check-workdir}
+getwd()
+list.files()
+list.files("data")
+```
+
+Если `transport_events_raw.csv` не виден, значит R смотрит не в ту папку. Не надо драматично смотреть в монитор. Надо проверить `getwd()`.
+
+# 1. Подключаем библиотеки
+
+```{r packages, eval=FALSE}
+required_packages <- c(
+  "tidyverse",
+  "janitor",
+  "lubridate",
+  "skimr",
+  "scales",
+  "glue"
+)
+
+installed <- rownames(installed.packages())
+to_install <- setdiff(required_packages, installed)
+
+if (length(to_install) > 0) {
+  install.packages(to_install)
+}
+
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(skimr)
+library(scales)
+library(glue)
+
+options(
+  readr.show_col_types = FALSE,
+  dplyr.summarise.inform = FALSE,
+  scipen = 999
+)
+```
+
+**Что важно по настройкам:**
+
+- `readr.show_col_types = FALSE` убирает лишний шум при чтении CSV;
+- `dplyr.summarise.inform = FALSE` убирает служебные сообщения `summarise()`;
+- `scipen = 999` не даёт R превращать нормальные числа в научную запись вида `1e+05`;
+- пакеты ставим один раз, подключаем каждый раз при новом запуске RStudio.
+
+На занятии можно просто выполнить:
+
+```{r source-setup, eval=FALSE}
+source("00_setup.R")
+```
+
+# 2. Кейс: журнал транспортных событий
+
+У нас есть учебная выгрузка `transport_events_raw.csv`. Каждая строка — событие на объекте транспортной инфраструктуры.
+
+Поля:
+
+| Поле в сыром CSV | Смысл |
+|---|---|
+| `Event ID` | идентификатор события |
+| `Event Time` | дата и время события |
+| `Line Name` | линия / направление |
+| `Station Name` | станция / объект |
+| `Event Type` | тип события |
+| `Delay Minutes` | задержка в минутах |
+| `Passenger Flow` | пассажиропоток |
+| `Temperature C` | температура |
+| `Status` | статус события |
+| `Comment` | комментарий диспетчера |
+
+В данных специально есть грязь: пропуски, дубли, отрицательные задержки, разные форматы дат, лишние пробелы. Это не баг лекции, это жизнь.
+
+# 3. Импорт CSV
+
+Базовый R умеет читать CSV через `read.csv()`. Но для аналитической работы удобнее `readr::read_csv()` из `tidyverse`.
+
+```{r read-csv}
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(skimr)
+library(scales)
+library(glue)
+
+options(readr.show_col_types = FALSE, dplyr.summarise.inform = FALSE, scipen = 999)
+
+raw_events <- read_csv(
+  "data/transport_events_raw.csv",
+  locale = locale(encoding = "UTF-8")
+)
+
+head(raw_events)
+```
+
+Проверяем тип объекта:
+
+```{r class-raw}
+class(raw_events)
+dim(raw_events)
+```
+
+`read_csv()` возвращает `tibble`. Это современный родственник `data.frame`: печатается аккуратнее и лучше дружит с `dplyr`.
+
+# 4. Первый осмотр данных
+
+Перед анализом надо понять, что лежит внутри таблицы.
+
+```{r first-look}
+names(raw_events)
+glimpse(raw_events)
+summary(raw_events)
+```
+
+Более удобный обзор:
+
+```{r skim-data}
+skim(raw_events)
+```
+
+**Лекторская мысль:** сначала `glimpse()`, потом героизм. Иначе это не анализ, а тыканье палкой в туман.
+
+# 5. Чистим названия столбцов
+
+В сыром CSV названия выглядят красиво для человека, но неудобно для кода:
+
+```text
+Event Time
+Station Name
+Delay Minutes
+Passenger Flow
+```
+
+После `clean_names()` будет так:
+
+```text
+event_time
+station_name
+delay_minutes
+passenger_flow
+```
+
+```{r clean-names}
+events <- raw_events %>%
+  clean_names()
+
+names(events)
+```
+
+# 6. Приводим типы и даты
+
+Транспортные данные почти всегда живут во времени, поэтому дата — не просто текст. Её надо превратить в нормальный тип времени.
+
+```{r mutate-types}
+events <- events %>%
+  mutate(
+    event_time = parse_date_time(
+      event_time,
+      orders = c("ymd HM", "dmy HM", "ymd HMS", "dmy HMS")
+    ),
+    line_name = str_squish(str_to_upper(line_name)),
+    station_name = na_if(str_squish(station_name), ""),
+    event_type = str_squish(str_to_lower(event_type)),
+    status = str_squish(str_to_lower(status)),
+    delay_minutes = as.numeric(delay_minutes),
+    passenger_flow = as.numeric(passenger_flow),
+    date = as_date(event_time),
+    hour = hour(event_time),
+    weekday = wday(event_time, label = TRUE, week_start = 1)
+  )
+
+glimpse(events)
+```
+
+**Что здесь произошло:**
+
+- `parse_date_time()` распознал разные форматы даты;
+- `str_squish()` убрал лишние пробелы;
+- `str_to_upper()` и `str_to_lower()` привели текст к единому стилю;
+- `as.numeric()` сделал числа числами;
+- `hour()` достал час события;
+- `wday()` достал день недели.
+
+# 7. Проверяем качество данных
+
+Грязные данные не спрашивают разрешения. Они просто приезжают в CSV и делают вид, что так и надо.
+
+```{r quality-report}
+quality_report <- events %>%
+  summarise(
+    rows = n(),
+    columns = ncol(.),
+    duplicated_event_ids = sum(duplicated(event_id)),
+    missing_station = sum(is.na(station_name)),
+    missing_time = sum(is.na(event_time)),
+    missing_delay = sum(is.na(delay_minutes)),
+    negative_delay = sum(delay_minutes < 0, na.rm = TRUE),
+    negative_passenger_flow = sum(passenger_flow < 0, na.rm = TRUE)
+  )
+
+quality_report
+```
+
+Посмотрим проблемные строки:
+
+```{r problem-rows}
+problem_rows <- events %>%
+  filter(
+    is.na(station_name) |
+      is.na(event_time) |
+      is.na(delay_minutes) |
+      delay_minutes < 0 |
+      passenger_flow < 0
+  )
+
+problem_rows
+```
+
+**Важный принцип:** проблемные строки сначала смотрим отдельно. Не удаляем их молча, потому что иногда именно они и есть главный вывод анализа.
+
+# 8. Создаём чистую рабочую версию
+
+```{r clean-version}
+events_clean <- events %>%
+  mutate(
+    problem_row = coalesce(
+      is.na(station_name) |
+        is.na(event_time) |
+        is.na(delay_minutes) |
+        delay_minutes < 0 |
+        passenger_flow < 0,
+      TRUE
+    ),
+    delay_minutes = if_else(delay_minutes < 0, NA_real_, delay_minutes),
+    passenger_flow = if_else(passenger_flow < 0, NA_real_, passenger_flow),
+    delay_level = case_when(
+      is.na(delay_minutes) ~ "нет данных",
+      delay_minutes == 0 ~ "без задержки",
+      delay_minutes <= 5 ~ "малая",
+      delay_minutes <= 15 ~ "средняя",
+      TRUE ~ "жёсткая"
+    )
+  ) %>%
+  distinct(event_id, .keep_all = TRUE)
+
+events_clean %>% count(problem_row)
+events_clean %>% count(delay_level)
+```
+
+`delay_level` — это новый аналитический признак. Мы превратили число в категорию, которую удобно объяснять человеку.
+
+# 9. Шесть команд dplyr, которые спасают жизнь
+
+| Команда | Что делает | Пример в транспорте |
+|---|---|---|
+| `select()` | выбирает столбцы | оставить станцию, время, задержку |
+| `filter()` | выбирает строки | события с задержкой >= 15 минут |
+| `arrange()` | сортирует | топ задержек |
+| `mutate()` | создаёт новые признаки | класс задержки |
+| `group_by()` | группирует | по станции или линии |
+| `summarise()` | считает итоги | средняя задержка |
+
+# 10. Фильтруем серьёзные задержки
+
+```{r big-delays}
+big_delays <- events_clean %>%
+  filter(!problem_row, delay_minutes >= 15) %>%
+  select(event_id, event_time, line_name, station_name, event_type, delay_minutes, passenger_flow) %>%
+  arrange(desc(delay_minutes))
+
+big_delays
+```
+
+**Смысл:** мы оставили только строки, где задержка не учебная пыль, а уже нормальный повод открыть аналитический блокнот.
+
+# 11. Группировка по станциям
+
+```{r station-summary}
+station_summary <- events_clean %>%
+  filter(!problem_row) %>%
+  group_by(station_name) %>%
+  summarise(
+    events = n(),
+    avg_delay = mean(delay_minutes, na.rm = TRUE),
+    max_delay = max(delay_minutes, na.rm = TRUE),
+    passenger_total = sum(passenger_flow, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(avg_delay))
+
+station_summary
+```
+
+**Смысл:** группировка превращает журнал событий в управленческий вывод: где проблема заметнее.
+
+# 12. Группировка по линиям
+
+```{r line-summary}
+line_summary <- events_clean %>%
+  filter(!problem_row) %>%
+  group_by(line_name) %>%
+  summarise(
+    events = n(),
+    avg_delay = mean(delay_minutes, na.rm = TRUE),
+    critical_events = sum(delay_minutes >= 15, na.rm = TRUE),
+    passenger_total = sum(passenger_flow, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(critical_events))
+
+line_summary
+```
+
+# 13. Справочник станций и `left_join()`
+
+В реальных проектах данные редко лежат в одной прекрасной табличке. Обычно есть событие и есть справочник.
+
+```{r reference-join}
+stations_reference <- read_csv(
+  "data/stations_reference.csv",
+  locale = locale(encoding = "UTF-8")
+)
+
+stations_reference
+
+station_summary_enriched <- station_summary %>%
+  left_join(stations_reference, by = "station_name")
+
+station_summary_enriched
+```
+
+`left_join()` добавляет к нашей аналитической таблице информацию из справочника: район, тип объекта, критичность.
+
+# 14. Первый график
+
+```{r plot-stations, fig.width=9, fig.height=5}
+ggplot(station_summary, aes(x = reorder(station_name, avg_delay), y = avg_delay)) +
+  geom_col(fill = "#0F6FEF") +
+  coord_flip() +
+  labs(
+    title = "Средняя задержка по станциям",
+    subtitle = "Учебная синтетическая выгрузка транспортных событий",
+    x = "Станция",
+    y = "Средняя задержка, мин"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+График нужен не для красоты. Он нужен, чтобы быстро увидеть, где больнее.
+
+# 15. Второй график: задержки по часам
+
+```{r plot-hour, fig.width=9, fig.height=5}
+ggplot(events_clean %>% filter(!problem_row), aes(x = hour, y = delay_minutes)) +
+  geom_point(alpha = 0.45, color = "#0F6FEF") +
+  geom_smooth(method = "loess", se = FALSE, color = "#073B7A") +
+  labs(
+    title = "Задержки по часам суток",
+    x = "Час суток",
+    y = "Задержка, мин"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+# 16. Список как мини-отчёт
+
+Список в R может хранить разные объекты: число строк, таблицу качества, таблицу по станциям, дату создания отчёта.
+
+```{r list-report}
+lesson_report <- list(
+  raw_rows = nrow(raw_events),
+  clean_rows = nrow(events_clean),
+  quality = quality_report,
+  station_summary = station_summary,
+  line_summary = line_summary,
+  created_at = Sys.time()
+)
+
+lesson_report$quality
+lesson_report$station_summary
+```
+
+# 17. Сохраняем результаты
+
+```{r save-results}
+write_csv(events_clean, "outputs/transport_events_clean.csv")
+write_csv(station_summary, "outputs/station_summary.csv")
+write_csv(line_summary, "outputs/line_summary.csv")
+```
+
+После выполнения посмотрите папку `outputs`.
+
+```{r list-outputs}
+list.files("outputs")
+```
+
+# 18. Типичные ошибки на этой лекции
+
+| Ошибка | Почему возникает | Что делать |
+|---|---|---|
+| `file does not exist` | R смотрит не в ту папку | проверить `getwd()` и открыть `.Rproj` |
+| `object not found` | объект не создан или имя написано иначе | выполнить блок выше, проверить название |
+| `could not find function` | пакет не подключён или русская буква вместо английской | `library(...)`, английская раскладка |
+| `unexpected symbol` | пропущена запятая, скобка или кавычка | смотреть строку ошибки |
+| пустой график | после фильтра не осталось строк | проверить `nrow()` после фильтра |
+
+# 19. Мини-миссия на паре
+
+Сделайте в RStudio:
+
+1. Найдите топ-5 станций по количеству критических событий `delay_minutes >= 15`.
+2. Найдите час суток, где средняя задержка максимальна.
+3. Постройте график пассажиропотока по линиям.
+4. Напишите один управленческий вывод: где проблема и что проверять дальше.
+
+Стартовый код:
+
+```{r mini-mission-start, eval=FALSE}
+# 1. Топ-5 станций по критическим событиям
+critical_by_station <- events_clean %>%
+  filter(!problem_row, delay_minutes >= 15) %>%
+  count(station_name, sort = TRUE) %>%
+  slice_head(n = 5)
+
+critical_by_station
+
+# 2. Час суток с максимальной средней задержкой
+hour_problem <- events_clean %>%
+  filter(!problem_row) %>%
+  group_by(hour) %>%
+  summarise(avg_delay = mean(delay_minutes, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(avg_delay))
+
+hour_problem
+```
+
+# 20. Финальный вывод
+
+Сегодня мы прошли полный мини-пайплайн:
+
+```text
+CSV -> tibble -> диагностика -> очистка -> dplyr -> ggplot -> вывод
+```
+
+Если очень коротко: **аналитик не просто пишет код. Аналитик превращает грязную таблицу в понятное решение.**
